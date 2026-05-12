@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "qa:readiness": "node scripts/check-readiness.mjs",
+    "seed:demo": "node scripts/seed-demo-data.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.103.0",
