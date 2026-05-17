@@ -21,6 +21,18 @@ const reportReasons: Array<{ value: ReportReason; label: string }> = [
 export default function ReportModal({ submitting, target, onCancel, onSubmit }: ReportModalProps) {
   const [reason, setReason] = useState<ReportReason>('harassment');
   const [details, setDetails] = useState('');
+  // FIX: track submit error so the user knows if onSubmit rejects
+  const [submitError, setSubmitError] = useState('');
+
+  // FIX: wrap onSubmit to catch rejections and surface them in the UI
+  async function handleSubmit() {
+    setSubmitError('');
+    try {
+      await onSubmit({ reason, details });
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
+    }
+  }
 
   return (
     <div
@@ -49,6 +61,10 @@ export default function ReportModal({ submitting, target, onCancel, onSubmit }: 
           borderRadius: 20,
           padding: '1.2rem',
           boxShadow: '0 24px 80px rgba(0,0,0,.18)',
+          // FIX: ensure the modal itself doesn't overflow on small viewports
+          maxHeight: '90vh',
+          overflowY: 'auto',
+          boxSizing: 'border-box',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
@@ -60,11 +76,14 @@ export default function ReportModal({ submitting, target, onCancel, onSubmit }: 
               This will create a moderation flag for review.
             </p>
           </div>
+          {/* FIX: type="button" prevents accidental form submission; aria-label for screen-readers; proper × character */}
           <button
+            type="button"
+            aria-label="Close report dialog"
             onClick={onCancel}
-            style={{ width: 32, height: 32, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)' }}
+            style={{ width: 32, height: 32, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--bg)', cursor: 'pointer' }}
           >
-            x
+            ×
           </button>
         </div>
 
@@ -100,6 +119,8 @@ export default function ReportModal({ submitting, target, onCancel, onSubmit }: 
             padding: '10px 12px',
             background: 'var(--bg)',
             marginBottom: 12,
+            // FIX: prevent select from overflowing its container
+            boxSizing: 'border-box',
           }}
         >
           {reportReasons.map((option) => (
@@ -123,23 +144,58 @@ export default function ReportModal({ submitting, target, onCancel, onSubmit }: 
             background: 'var(--bg)',
             resize: 'vertical',
             marginBottom: 14,
+            // FIX: prevent textarea from overflowing its container
+            boxSizing: 'border-box',
+            // FIX: match body font so textarea doesn't render in browser monospace
+            fontFamily: 'var(--font-body), sans-serif',
+            fontSize: 13,
+            color: 'var(--ink)',
+            lineHeight: 1.5,
           }}
         />
 
+        {/* FIX: show submit error banner when onSubmit rejects */}
+        {submitError && (
+          <div
+            style={{
+              background: '#FAEAEA',
+              border: '1px solid #E8C4C4',
+              borderRadius: 10,
+              padding: '8px 12px',
+              color: 'var(--red)',
+              fontSize: 13,
+              marginBottom: 12,
+            }}
+          >
+            {submitError}
+          </div>
+        )}
+
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          {/* FIX: type="button" on all buttons to prevent implicit form submission */}
           <button
+            type="button"
             onClick={onCancel}
-            style={{ border: '1px solid var(--border)', background: 'transparent', color: 'var(--muted)', padding: '10px 14px', borderRadius: 10 }}
+            style={{ border: '1px solid var(--border)', background: 'transparent', color: 'var(--muted)', padding: '10px 14px', borderRadius: 10, cursor: 'pointer' }}
           >
             Cancel
           </button>
           <button
+            type="button"
             className="button-primary"
-            onClick={() => void onSubmit({ reason, details })}
+            onClick={() => void handleSubmit()}
             disabled={submitting}
-            style={{ background: 'linear-gradient(135deg, var(--red), var(--stamp))', padding: '10px 14px', borderRadius: 10, fontWeight: 700, opacity: submitting ? 0.7 : 1 }}
+            style={{
+              background: 'linear-gradient(135deg, var(--red), var(--stamp))',
+              padding: '10px 14px',
+              borderRadius: 10,
+              fontWeight: 700,
+              opacity: submitting ? 0.7 : 1,
+              // FIX: show not-allowed cursor while submitting
+              cursor: submitting ? 'not-allowed' : 'pointer',
+            }}
           >
-            {submitting ? 'Submitting...' : 'Submit report'}
+            {submitting ? 'Submitting…' : 'Submit report'}
           </button>
         </div>
       </div>

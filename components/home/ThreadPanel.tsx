@@ -5,6 +5,16 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/context/AuthContext';
 import { Comment, Post, ReportTarget, formatTimeAgo, getAnonymousHandle, moodMeta } from '@/components/home/types';
 
+/* ── anonymous handle generator (mirrors page.tsx) ── */
+const _ADJ  = ['Amber','Quiet','Candid','Steady','Lucid','Sharp','Grounded','Nimble'];
+const _NOUN = ['Brief','Quill','Atlas','Verdict','Harbor','Ledger','Signal','Clover'];
+function randomAnonAuthor(): string {
+  const a = _ADJ[Math.floor(Math.random() * _ADJ.length)];
+  const n = _NOUN[Math.floor(Math.random() * _NOUN.length)];
+  const s = String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+  return `alias:${a} ${n} ${s}`;
+}
+
 function isSchemaBehind(message = '') {
   const normalizedMessage = message.toLowerCase();
   return normalizedMessage.includes('schema cache') || normalizedMessage.includes('column') || normalizedMessage.includes('constraint');
@@ -73,6 +83,34 @@ export default function ThreadPanel({
     };
   }, [post.id, showToast]);
 
+  /* ── realtime: stream new replies from other users ── */
+  useEffect(() => {
+    const channel = supabase
+      .channel(`thread:${post.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event:  'INSERT',
+          schema: 'public',
+          table:  'comments',
+          filter: `post_id=eq.${post.id}`,
+        },
+        (payload) => {
+          const incoming = payload.new as Comment;
+          // Skip our own optimistic inserts (already in state from submitReply)
+          setComments(cur => {
+            if (cur.some(c => c.id === incoming.id)) return cur;
+            // Don't show hidden comments
+            if (incoming.hidden) return cur;
+            return [...cur, incoming];
+          });
+        },
+      )
+      .subscribe();
+
+    return () => { void supabase.removeChannel(channel); };
+  }, [post.id]);
+
   const submitReply = useCallback(async () => {
     const body = reply.trim();
 
@@ -87,11 +125,12 @@ export default function ThreadPanel({
     }
 
     setSending(true);
+    try {
 
     const fallbackPayload = {
       post_id: post.id,
       body,
-      author: user?.email ?? 'anonymous',
+      author: randomAnonAuthor(), // never store real email
     };
     let response = await supabase
       .from('comments')
@@ -109,9 +148,8 @@ export default function ThreadPanel({
     const { data, error } = response;
 
 if (error || !data) {
-  setSending(false);
-  console.error('Reply insert error:', error); // ← ADD THIS
-showToast(`Reply failed: ${error?.message ?? 'no data returned'}`);
+  console.error('Reply insert error:', error);
+  showToast(`Reply failed: ${error?.message ?? 'no data returned'}`);
   return;
 }
 
@@ -119,11 +157,22 @@ showToast(`Reply failed: ${error?.message ?? 'no data returned'}`);
 
     setComments((currentComments) => [...currentComments, data as Comment]);
     setReply('');
-    setSending(false);
     onPostUpdated(updatedPost);
     showToast('Reply posted.');
 
-    await supabase.from('posts').update({ reply_count: updatedPost.reply_count }).eq('id', post.id);
+    // FIX #6: use RPC increment instead of SET to avoid lost-update race condition
+    // when two replies land concurrently both reading the same reply_count.
+    const { error: rpcError } = await supabase.rpc('increment_reply_count', { post_id: post.id });
+    if (rpcError) {
+      // Graceful fallback: SET is better than silently losing the count
+      await supabase
+        .from('posts')
+        .update({ reply_count: updatedPost.reply_count })
+        .eq('id', post.id);
+    }
+    } finally {
+      setSending(false);
+    }
   }, [onPostUpdated, post, reply, showToast, user]);
 
   const replyStats = useMemo(
