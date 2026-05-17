@@ -25,6 +25,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/context/AuthContext';
 import ThreadPanel from '@/components/home/ThreadPanel';
+import type { Mood } from '@/components/home/types';
 
 /* ── TYPES ── */
 type Post = {
@@ -33,8 +34,8 @@ type Post = {
   body: string;
   author: string;
   created_at: string;
-  mood: string;
-  category?: string;           // FIX #4: was missing, ThreadPanel needs it
+  mood: Mood;
+  category?: string | null;
   reply_count: number;
   upvotes: number;
 };
@@ -86,7 +87,6 @@ const TICKER_FALLBACK = [
 // FIX #10: ROOM_NAMES drives sidebar order; live counts fetched from DB
 const ROOM_NAMES = ['Recruitment', 'Salaries', 'LLM Abroad', 'Internships', 'Litigation', 'Moot Court'];
 
-// BARO_HEIGHTS and HEAT_LEVELS are now computed from live DB data
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const VOTE_STORAGE_KEY = 'casebook:votes';
 
@@ -195,39 +195,32 @@ export default function HomePage() {
   const [loading,       setLoading]       = useState(true);
   const [sort,          setSort]          = useState<Sort>('hot');
   const [query,         setQuery]         = useState('');
-  const [searchResults, setSearchResults] = useState<Post[] | null>(null); // FIX #7: server-side search
+  const [searchResults, setSearchResults] = useState<Post[] | null>(null);
   const [showModal,     setShowModal]     = useState(false);
   const [showCmd,       setShowCmd]       = useState(false);
   const [toast,         setToast]         = useState('');
-  const [form,          setForm]          = useState({ title: '', body: '', mood: 'neutral', category: '' });
+  const [form,          setForm]          = useState({ title: '', body: '', mood: 'neutral' as Mood, category: '' });
   const [submitting,    setSubmitting]    = useState(false);
   const [selectedPost,  setSelectedPost]  = useState<Post | null>(null);
   const [localVotes,    setLocalVotes]    = useState<Partial<Record<string, VoteValue>>>({});
   const [pendingVotes,  setPendingVotes]  = useState<Partial<Record<string, boolean>>>({});
-  // FIX #10: live room counts from DB instead of hardcoded values
   const [roomCounts,    setRoomCounts]    = useState<Record<string, number>>({});
-  // LIVE SIDEBAR DATA
-  const [baroHeights,   setBaroHeights]   = useState<number[]>([22, 35, 18, 44, 28, 56, 64]); // seeded; replaced on load
+  const [baroHeights,   setBaroHeights]   = useState<number[]>([22, 35, 18, 44, 28, 56, 64]);
   const [heatLevels,    setHeatLevels]    = useState<number[]>(Array(35).fill(0));
   const [allMoodCounts, setAllMoodCounts] = useState<Record<string, number>>({});
   const [activeRoom,    setActiveRoom]    = useState<string | null>(null);
-  // Ticker
   const [tickerItems,   setTickerItems]   = useState<TickerItem[]>(TICKER_FALLBACK);
   const [showTickerMgr, setShowTickerMgr] = useState(false);
   const [tickerForm,    setTickerForm]    = useState({ tag: '', text: '' });
   const [tickerSaving,  setTickerSaving]  = useState(false);
 
-  // Report modal
   const [reportTarget,     setReportTarget]     = useState<ReportTarget | null>(null);
   const [reportReason,     setReportReason]     = useState('');
   const [reportSubmitting, setReportSubmitting] = useState(false);
 
-  // Admin moderation panel
-  // FIX: ReportRow must be standalone — ReportTarget.id conflicts with report's own id,
-  //      and DB returns target_id / target_type (not id / type).
   type ReportRow = {
-    id:          string;                              // report UUID
-    target_id:   string;                             // post or comment UUID
+    id:          string;
+    target_id:   string;
     target_type: 'post' | 'comment';
     title:       string;
     body:        string;
@@ -240,16 +233,15 @@ export default function HomePage() {
   const [reportFilter,         setReportFilter]         = useState<'pending'|'dismissed'|'removed'|'all'>('pending');
   const [showModerationPanel,  setShowModerationPanel]  = useState(false);
   const [moderating,           setModerating]           = useState<string | null>(null);
-  // keep pendingReports as a derived view for the badge count
   const pendingReports = reports.filter(r => r.status === 'pending');
 
   const inFlight       = useRef<Set<string>>(new Set());
   const localVotesRef  = useRef<Partial<Record<string, VoteValue>>>({});
   const liveScoresRef  = useRef<Record<string, number>>({});
   const toastTimer     = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined); // FIX #7
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const moodCanvasRef  = useRef<HTMLCanvasElement>(null);
-  const lastPostAtRef  = useRef<number>(0); // rate-limit: ms timestamp of last submission
+  const lastPostAtRef  = useRef<number>(0);
 
   /* ── fetch ── */
   const fetchPosts = useCallback(async (opts?: { backgroundRefresh?: boolean }) => {
@@ -321,7 +313,7 @@ export default function HomePage() {
     return () => { window.clearTimeout(storedTimer); controller.abort(); };
   }, [posts]);
 
-  /* ── server-side search (FIX #7) ── */
+  /* ── server-side search ── */
   useEffect(() => {
     if (!query.trim()) {
       setSearchResults(null);
@@ -339,10 +331,9 @@ export default function HomePage() {
     return () => clearTimeout(searchTimerRef.current);
   }, [query]);
 
-  /* ── live sidebar data: activity, heat, mood, rooms ── */
+  /* ── live sidebar data ── */
   useEffect(() => {
     async function fetchSidebarData() {
-      // Single query: grab created_at, mood, category for all posts
       const { data } = await supabase
         .from('posts')
         .select('created_at, mood, category');
@@ -351,13 +342,9 @@ export default function HomePage() {
       const now = Date.now();
       const DAY = 86_400_000;
 
-      // ── Activity barograph: posts per day for last 7 days ──
       const barBuckets = Array(7).fill(0);
-      // ── Heat map: posts per day for last 35 days ──
       const heatBuckets = Array(35).fill(0);
-      // ── Mood counts (all posts, not just the loaded 20) ──
       const moodCounts: Record<string, number> = {};
-      // ── Room counts ──
       const roomC: Record<string, number> = {};
 
       for (const row of data as { created_at: string; mood: string; category?: string }[]) {
@@ -371,11 +358,9 @@ export default function HomePage() {
         if (row.category) roomC[row.category] = (roomC[row.category] ?? 0) + 1;
       }
 
-      // Normalise bar heights to px (max 64px)
       const barMax = Math.max(...barBuckets, 1);
       setBaroHeights(barBuckets.map(n => Math.round((n / barMax) * 64) || 4));
 
-      // Normalise heat to 0-4
       const heatMax = Math.max(...heatBuckets, 1);
       setHeatLevels(heatBuckets.map(n => Math.min(4, Math.round((n / heatMax) * 4))));
 
@@ -385,14 +370,13 @@ export default function HomePage() {
     void fetchSidebarData();
   }, []);
 
-  /* ── mood donut — redraws on allMoodCounts (all posts, not just page) ── */
+  /* ── mood donut ── */
   useEffect(() => {
     const canvas = moodCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     const moods = ['hot', 'answered', 'debated', 'neutral'];
-    // Fall back to 1 per slice so the donut always shows something before data loads
     const counts = moods.reduce((acc, m) => {
       acc[m] = allMoodCounts[m] || 1;
       return acc;
@@ -413,21 +397,19 @@ export default function HomePage() {
   }, [allMoodCounts]);
 
   /* ── toast ── */
-  // FIX: made useCallback so handleShare / handleReport can safely depend on it
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(''), 2200);
   }, []);
 
-  /* ── submit post (FIX #8, #9) ── */
+  /* ── submit post ── */
   async function submitPost() {
     if (!form.title.trim()) return;
     if (form.title.trim().length < 10) {
       showToast('Title must be at least 10 characters.');
-      return; // FIX #9: removed stray setSubmitting(false) that ran before setSubmitting(true)
+      return;
     }
-    // Rate limit: one post per 60 seconds per session
     const now = Date.now();
     const RATE_MS = 60_000;
     if (now - lastPostAtRef.current < RATE_MS) {
@@ -436,7 +418,7 @@ export default function HomePage() {
       return;
     }
     setSubmitting(true);
-    try { // FIX #8: try/finally so button never gets stuck
+    try {
       const newPost = {
         title: form.title, body: form.body,
         author: randomAnonymousAuthor(),
@@ -466,7 +448,7 @@ export default function HomePage() {
     }
   }
 
-  /* ── vote (FIX #5) ── */
+  /* ── vote ── */
   async function voteOnPost(e: React.MouseEvent, post: Post, vote: VoteValue) {
     e.stopPropagation();
 
@@ -519,7 +501,6 @@ export default function HomePage() {
         writeStoredVote(post.id, vote);
         showToast('Vote recorded.');
       } else {
-        // Revert — FIX #5: was `previousVote || undefined as unknown as VoteValue`
         liveScoresRef.current[post.id] = currentScore;
         if (previousVote) {
           localVotesRef.current[post.id] = previousVote;
@@ -537,7 +518,7 @@ export default function HomePage() {
     }
   }
 
-  /* ── share handler (FIX #1 — ThreadPanel now wired) ── */
+  /* ── share handler ── */
   const handleShare = useCallback(async (postId: string) => {
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/?post=${postId}`);
@@ -547,18 +528,17 @@ export default function HomePage() {
     }
   }, [showToast]);
 
-  /* ── report handler — opens reason-selection modal ── */
+  /* ── report handler ── */
   const handleReport = useCallback((target: ReportTarget) => {
     setReportTarget(target);
     setReportReason('');
   }, []);
 
-  /* ── submitReport — inserts with reason, deduplicates ── */
+  /* ── submitReport ── */
   const submitReport = useCallback(async () => {
     if (!reportTarget || !reportReason) return;
     setReportSubmitting(true);
     try {
-      // Check for duplicate report from this browser session
       const storageKey = `casebook:reported:${reportTarget.id}`;
       if (typeof window !== 'undefined' && window.localStorage.getItem(storageKey)) {
         showToast("You've already reported this content.");
@@ -577,13 +557,11 @@ export default function HomePage() {
       });
 
       if (error) {
-        // Graceful fallback if table doesn't exist yet
         console.error('Report insert failed:', error.message);
         showToast('Could not submit report. Please try again.');
         return;
       }
 
-      // Mark as reported in localStorage to prevent spam
       if (typeof window !== 'undefined') {
         window.localStorage.setItem(storageKey, '1');
       }
@@ -594,7 +572,7 @@ export default function HomePage() {
     }
   }, [reportTarget, reportReason, showToast]);
 
-  /* ── fetch reports (admin only) — all statuses so history is visible ── */
+  /* ── fetch reports (admin only) ── */
   const fetchPendingReports = useCallback(async () => {
     if (!user) return;
     const { data, error } = await supabase
@@ -609,15 +587,13 @@ export default function HomePage() {
     if (user) void fetchPendingReports();
   }, [user, fetchPendingReports]);
 
-  /* ── moderate: dismiss or remove ── */
+  /* ── moderate ── */
   const moderateReport = useCallback(async (reportId: string, targetId: string, action: 'dismissed' | 'removed') => {
     setModerating(reportId);
     try {
-      // Update report status
       await supabase.from('reports').update({ status: action }).eq('id', reportId);
 
       if (action === 'removed') {
-        // Soft-delete: update post or comment as removed
         const report = reports.find(r => r.id === reportId);
         if (report?.target_type === 'post') {
           await supabase.from('posts').update({ body: '[removed by moderator]', title: '[removed]' }).eq('id', targetId);
@@ -630,14 +606,13 @@ export default function HomePage() {
         showToast('Report dismissed.');
       }
 
-      // Update local state — keep the row but change its status so filter tabs work
       setReports(cur => cur.map(r => r.id === reportId ? { ...r, status: action } : r));
     } finally {
       setModerating(null);
     }
   }, [reports, showToast]);
 
-  /* ── ticker: fetch from DB ── */
+  /* ── ticker: fetch ── */
   useEffect(() => {
     async function fetchTicker() {
       const { data } = await supabase
@@ -651,7 +626,7 @@ export default function HomePage() {
     void fetchTicker();
   }, []);
 
-  /* ── ticker: add item ── */
+  /* ── ticker: add ── */
   const addTickerItem = useCallback(async () => {
     const tag  = tickerForm.tag.trim();
     const text = tickerForm.text.trim();
@@ -672,10 +647,9 @@ export default function HomePage() {
     showToast('Ticker item added.');
   }, [tickerForm, showToast]);
 
-  /* ── ticker: delete item ── */
+  /* ── ticker: delete ── */
   const deleteTickerItem = useCallback(async (id: string) => {
     if (id.startsWith('f')) {
-      // fallback item — just remove from local state
       setTickerItems(cur => cur.filter(t => t.id !== id));
       return;
     }
@@ -702,14 +676,12 @@ export default function HomePage() {
     return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('openAskModal', onAsk); };
   }, [openAsk]);
 
-  /* ── deep-link: open thread from ?post=<id> on load ── */
+  /* ── deep-link ── */
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const postId = params.get('post');
     if (!postId) return;
-    // Try to find in already-loaded posts first, else fetch directly
     async function openDeepLinkedPost() {
-      // Wait briefly for initial posts to load
       await new Promise(r => setTimeout(r, 800));
       const existing = posts.find(p => p.id === postId);
       if (existing) { setSelectedPost(existing); return; }
@@ -718,12 +690,11 @@ export default function HomePage() {
     }
     void openDeepLinkedPost();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally run once on mount
+  }, []);
 
-  /* ── scroll restoration: save position before opening thread ── */
   const scrollYRef = useRef(0);
 
-  /* ── scroll: float btn + read progress ── */
+  /* ── scroll ── */
   useEffect(() => {
     const onScroll = () => {
       const fab  = document.getElementById('floatAsk');
@@ -738,7 +709,7 @@ export default function HomePage() {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
-  /* ── filtered posts (FIX #7: server search + room filter) ── */
+  /* ── filtered posts ── */
   const filtered = (query.trim() && searchResults !== null ? searchResults : posts)
     .filter(p => {
       const matchesQuery = !query ||
@@ -748,7 +719,7 @@ export default function HomePage() {
       return matchesQuery && matchesRoom;
     });
 
-  /* ── thread view (FIX #1: replaced inline ThreadView with ThreadPanel) ── */
+  /* ── thread view ── */
   if (selectedPost) return (
     <div style={{ maxWidth: 1180, margin: '0 auto', padding: '36px 28px 56px' }}>
       <ThreadPanel
@@ -783,7 +754,6 @@ export default function HomePage() {
             </span>
           ))}
         </div>
-        {/* Edit button — only visible to logged-in admin */}
         {user && <button
           onClick={() => setShowTickerMgr(true)}
           title="Manage ticker"
@@ -876,7 +846,6 @@ export default function HomePage() {
             ))}
           </div>
 
-          {/* post list — FIX: shimmer is now card-shaped, empty state is designed */}
           {loading ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {[1, 2, 3].map(i => (
@@ -1002,7 +971,6 @@ export default function HomePage() {
         {/* ── RAIL ── */}
         <aside className="rail">
 
-          {/* Activity — live post counts per day, last 7 days */}
           <div>
             <div className="rail-label">Activity</div>
             <div className="barograph">
@@ -1011,7 +979,6 @@ export default function HomePage() {
                   key={i}
                   className={`bar-col${i === 6 ? ' active' : ''}`}
                   style={{ height: h }}
-                  title={`${Math.round(h / 64 * baroHeights.reduce((a,b)=>Math.max(a,b),1))} posts`}
                 />
               ))}
             </div>
@@ -1020,7 +987,6 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Mood donut — all posts in DB, not just current page */}
           <div>
             <div className="rail-label">Mood</div>
             <div className="mood-ring-wrap">
@@ -1041,7 +1007,6 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Discussion heat — live post counts per day, last 35 days */}
           <div>
             <div className="rail-label">Discussion heat</div>
             <div className="heatmap-grid">
@@ -1060,7 +1025,6 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Rooms — live counts, click to filter feed */}
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <div className="rail-label" style={{ marginBottom: 0 }}>Rooms</div>
@@ -1090,7 +1054,6 @@ export default function HomePage() {
                       background: activeRoom === r.name ? 'var(--accent-soft)' : 'transparent',
                       transition: 'background .15s',
                     }}
-                    title={`Filter by ${r.name}`}
                   >
                     <span className="room-name" style={{ fontWeight: activeRoom === r.name ? 700 : undefined, color: activeRoom === r.name ? 'var(--accent)' : undefined }}>
                       {r.name}
@@ -1109,7 +1072,6 @@ export default function HomePage() {
             Start a brief →
           </button>
 
-          {/* ── MODERATION (admin only) ── */}
           {user && (
             <div style={{ marginTop: 8 }}>
               <button
@@ -1241,6 +1203,7 @@ export default function HomePage() {
           </div>
         </div>
       )}
+
       {/* ── TICKER MANAGER MODAL ── */}
       {showTickerMgr && (
         <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setShowTickerMgr(false); }}>
@@ -1258,7 +1221,6 @@ export default function HomePage() {
               >✕</button>
             </div>
 
-            {/* Existing items */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 20, maxHeight: 260, overflowY: 'auto' }}>
               {tickerItems.length === 0 ? (
                 <div style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', padding: '20px 0' }}>
@@ -1302,7 +1264,6 @@ export default function HomePage() {
               ))}
             </div>
 
-            {/* Add new item */}
             <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
               <div style={{ fontSize: 11, fontFamily: 'var(--font-mono), monospace', color: 'var(--muted)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 10 }}>
                 Add new item
@@ -1357,7 +1318,6 @@ export default function HomePage() {
               >✕</button>
             </div>
 
-            {/* Preview of content being reported */}
             <div style={{
               background: 'rgba(240,237,227,0.7)', border: '1px solid var(--border)',
               borderRadius: 10, padding: '10px 14px', marginBottom: 18,
@@ -1427,7 +1387,8 @@ export default function HomePage() {
           </div>
         </div>
       )}
-      {/* ── FULL MODERATION PANEL MODAL (admin only) ── */}
+
+      {/* ── MODERATION PANEL ── */}
       {showModerationPanel && user && (() => {
         const STATUS_COLORS: Record<string, { bg: string; text: string; border: string }> = {
           pending:   { bg: 'rgba(168,67,53,0.08)',  text: 'var(--stamp)',  border: 'rgba(168,67,53,0.3)'  },
@@ -1448,8 +1409,6 @@ export default function HomePage() {
             style={{ alignItems: 'flex-start', paddingTop: 40 }}
           >
             <div className="modal" style={{ maxWidth: 700, width: '100%', maxHeight: 'calc(100vh - 80px)', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}>
-
-              {/* Header */}
               <div style={{ padding: '20px 24px 0', flexShrink: 0 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
                   <div>
@@ -1466,41 +1425,18 @@ export default function HomePage() {
                     </div>
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <button
-                      onClick={() => void fetchPendingReports()}
-                      title="Refresh"
-                      style={{ border: '1px solid var(--border)', background: 'var(--tag-bg)', color: 'var(--muted)', width: 30, height: 30, borderRadius: 8, cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                    >↻</button>
-                    <button
-                      onClick={() => setShowModerationPanel(false)}
-                      style={{ border: 'none', background: 'var(--tag-bg)', color: 'var(--muted)', width: 30, height: 30, borderRadius: 8, cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                    >✕</button>
+                    <button onClick={() => void fetchPendingReports()} title="Refresh" style={{ border: '1px solid var(--border)', background: 'var(--tag-bg)', color: 'var(--muted)', width: 30, height: 30, borderRadius: 8, cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>↻</button>
+                    <button onClick={() => setShowModerationPanel(false)} style={{ border: 'none', background: 'var(--tag-bg)', color: 'var(--muted)', width: 30, height: 30, borderRadius: 8, cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
                   </div>
                 </div>
-
-                {/* Filter tabs */}
                 <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--border)', paddingBottom: 0 }}>
                   {(['pending','all','dismissed','removed'] as const).map(f => (
-                    <button
-                      key={f}
-                      onClick={() => setReportFilter(f)}
-                      style={{
-                        padding: '7px 14px', fontSize: 11, fontFamily: 'var(--font-mono), monospace',
-                        letterSpacing: '0.05em', textTransform: 'uppercase',
-                        border: 'none', background: 'none', cursor: 'pointer',
-                        color: reportFilter === f ? 'var(--accent)' : 'var(--muted)',
-                        borderBottom: `2px solid ${reportFilter === f ? 'var(--accent)' : 'transparent'}`,
-                        marginBottom: -1, fontWeight: reportFilter === f ? 700 : 400,
-                        transition: 'all .12s',
-                      }}
-                    >
+                    <button key={f} onClick={() => setReportFilter(f)} style={{ padding: '7px 14px', fontSize: 11, fontFamily: 'var(--font-mono), monospace', letterSpacing: '0.05em', textTransform: 'uppercase', border: 'none', background: 'none', cursor: 'pointer', color: reportFilter === f ? 'var(--accent)' : 'var(--muted)', borderBottom: `2px solid ${reportFilter === f ? 'var(--accent)' : 'transparent'}`, marginBottom: -1, fontWeight: reportFilter === f ? 700 : 400, transition: 'all .12s' }}>
                       {f} <span style={{ opacity: 0.7 }}>({counts[f]})</span>
                     </button>
                   ))}
                 </div>
               </div>
-
-              {/* Report list */}
               <div style={{ flex: 1, overflowY: 'auto', padding: '12px 24px 24px' }}>
                 {filteredReports.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--muted)', fontFamily: 'var(--font-mono), monospace', fontSize: 13 }}>
@@ -1513,94 +1449,30 @@ export default function HomePage() {
                       const isActing = moderating === r.id;
                       const isPending = r.status === 'pending';
                       return (
-                        <div
-                          key={r.id}
-                          style={{
-                            border: `1px solid ${sc.border}`,
-                            borderRadius: 14,
-                            background: sc.bg,
-                            padding: '14px 16px',
-                            display: 'flex', flexDirection: 'column', gap: 10,
-                            opacity: isActing ? 0.6 : 1,
-                            transition: 'opacity .15s',
-                          }}
-                        >
-                          {/* Top row: type badge + status + date */}
+                        <div key={r.id} style={{ border: `1px solid ${sc.border}`, borderRadius: 14, background: sc.bg, padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10, opacity: isActing ? 0.6 : 1, transition: 'opacity .15s' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                            <span style={{
-                              fontSize: 9, fontFamily: 'var(--font-mono), monospace',
-                              fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em',
-                              color: r.target_type === 'post' ? 'var(--accent)' : '#8B5C2A',
-                              background: r.target_type === 'post' ? 'var(--accent-soft)' : 'rgba(139,92,42,0.12)',
-                              padding: '2px 8px', borderRadius: 999, border: '1px solid',
-                              borderColor: r.target_type === 'post' ? 'rgba(23,107,96,0.25)' : 'rgba(139,92,42,0.25)',
-                            }}>{r.target_type}</span>
-                            <span style={{
-                              fontSize: 9, fontFamily: 'var(--font-mono), monospace',
-                              fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em',
-                              color: sc.text, padding: '2px 8px', borderRadius: 999,
-                              background: r.status === 'pending' ? 'rgba(168,67,53,0.15)' : r.status === 'removed' ? 'rgba(23,107,96,0.15)' : 'rgba(129,117,103,0.15)',
-                            }}>{r.status}</span>
+                            <span style={{ fontSize: 9, fontFamily: 'var(--font-mono), monospace', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: r.target_type === 'post' ? 'var(--accent)' : '#8B5C2A', background: r.target_type === 'post' ? 'var(--accent-soft)' : 'rgba(139,92,42,0.12)', padding: '2px 8px', borderRadius: 999, border: '1px solid', borderColor: r.target_type === 'post' ? 'rgba(23,107,96,0.25)' : 'rgba(139,92,42,0.25)' }}>{r.target_type}</span>
+                            <span style={{ fontSize: 9, fontFamily: 'var(--font-mono), monospace', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: sc.text, padding: '2px 8px', borderRadius: 999, background: r.status === 'pending' ? 'rgba(168,67,53,0.15)' : r.status === 'removed' ? 'rgba(23,107,96,0.15)' : 'rgba(129,117,103,0.15)' }}>{r.status}</span>
                             <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono), monospace' }}>
                               {new Date(r.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                               {' · '}{new Date(r.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
                             </span>
                           </div>
-
-                          {/* Content preview */}
-                          <div style={{
-                            background: 'rgba(250,247,240,0.85)', border: '1px solid var(--border)',
-                            borderRadius: 10, padding: '10px 12px',
-                          }}>
-                            {r.title && (
-                              <div style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 600, lineHeight: 1.4, marginBottom: r.body ? 4 : 0 }}>
-                                {r.title}
-                              </div>
-                            )}
-                            {r.body && (
-                              <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 }}>
-                                {r.body.slice(0, 200)}{r.body.length > 200 ? '…' : ''}
-                              </div>
-                            )}
-                            <div style={{ marginTop: 6, fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono), monospace' }}>
-                              by {getHandle(r.author)}
-                            </div>
+                          <div style={{ background: 'rgba(250,247,240,0.85)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
+                            {r.title && <div style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 600, lineHeight: 1.4, marginBottom: r.body ? 4 : 0 }}>{r.title}</div>}
+                            {r.body && <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5 }}>{r.body.slice(0, 200)}{r.body.length > 200 ? '…' : ''}</div>}
+                            <div style={{ marginTop: 6, fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--font-mono), monospace' }}>by {getHandle(r.author)}</div>
                           </div>
-
-                          {/* Reason */}
                           <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                             <span style={{ fontFamily: 'var(--font-mono), monospace', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Reason </span>
                             <strong style={{ color: 'var(--text)' }}>{r.reason}</strong>
                           </div>
-
-                          {/* Actions — only show for pending reports */}
                           {isPending && (
                             <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
-                              <button
-                                disabled={isActing}
-                                onClick={() => void moderateReport(r.id, r.target_id, 'dismissed')}
-                                style={{
-                                  flex: 1, padding: '8px 0', borderRadius: 9, fontSize: 12,
-                                  border: '1px solid var(--border)', background: 'rgba(250,247,240,0.9)',
-                                  color: 'var(--muted)', cursor: isActing ? 'default' : 'pointer',
-                                  fontFamily: 'var(--font-mono), monospace', letterSpacing: '0.04em',
-                                  fontWeight: 600, transition: 'all .12s',
-                                }}
-                              >
+                              <button disabled={isActing} onClick={() => void moderateReport(r.id, r.target_id, 'dismissed')} style={{ flex: 1, padding: '8px 0', borderRadius: 9, fontSize: 12, border: '1px solid var(--border)', background: 'rgba(250,247,240,0.9)', color: 'var(--muted)', cursor: isActing ? 'default' : 'pointer', fontFamily: 'var(--font-mono), monospace', letterSpacing: '0.04em', fontWeight: 600, transition: 'all .12s' }}>
                                 {isActing ? '…' : '✓ Dismiss'}
                               </button>
-                              <button
-                                disabled={isActing}
-                                onClick={() => void moderateReport(r.id, r.target_id, 'removed')}
-                                style={{
-                                  flex: 1, padding: '8px 0', borderRadius: 9, fontSize: 12,
-                                  border: '1px solid rgba(168,67,53,0.4)',
-                                  background: 'rgba(168,67,53,0.10)',
-                                  color: 'var(--stamp)', cursor: isActing ? 'default' : 'pointer',
-                                  fontFamily: 'var(--font-mono), monospace', letterSpacing: '0.04em',
-                                  fontWeight: 600, transition: 'all .12s',
-                                }}
-                              >
+                              <button disabled={isActing} onClick={() => void moderateReport(r.id, r.target_id, 'removed')} style={{ flex: 1, padding: '8px 0', borderRadius: 9, fontSize: 12, border: '1px solid rgba(168,67,53,0.4)', background: 'rgba(168,67,53,0.10)', color: 'var(--stamp)', cursor: isActing ? 'default' : 'pointer', fontFamily: 'var(--font-mono), monospace', letterSpacing: '0.04em', fontWeight: 600, transition: 'all .12s' }}>
                                 {isActing ? '…' : '⊗ Remove content'}
                               </button>
                             </div>
@@ -1620,7 +1492,6 @@ export default function HomePage() {
           </div>
         );
       })()}
-
     </>
   );
 }
